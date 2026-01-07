@@ -1,7 +1,17 @@
-# Финальный конфиг CodeMaster Empire
-BOT_TOKEN = "8233769788:AAHrypea_Bc8ggUilJiyXYAFnN9k5kCqRvg"
-ADMIN_ID = 7076530573
-CHANNEL_ID = "@cm_empire_news"
+import os
+from dotenv import load_dotenv
 
-DB_NAME = "codemaster_v1.db"
-TRIAL_DAYS = 10
+# Загружаем переменные из файла .env (если он есть)
+load_dotenv()
+
+# Берем токен из переменных окружения
+# В Amvera мы создадим переменную с именем BOT_TOKEN
+TOKEN = os.getenv("BOT_TOKEN")
+
+# Если нужно, здесь можно добавить ID администратора или другие настройки
+# ADMIN_ID = os.getenv("ADMIN_ID")
+
+# Проверка на случай, если забыли указать токен
+if not TOKEN:
+    print("ОШИБКА: Токен бота не найден! Проверьте переменные окружения или файл .env")
+  
