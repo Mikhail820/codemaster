@@ -1,17 +1,7 @@
-import os
-from dotenv import load_dotenv
+# Финальный конфиг CodeMaster Empire
+BOT_TOKEN = "8233769788:AAHrypea_Bc8ggUilJiyXYAFnN9k5kCqRvg"
+ADMIN_ID = 7076530573
+CHANNEL_ID = "@cm_empire_news"
 
-# Загружаем переменные из файла .env
-load_dotenv()
-
-# Токен Мастер-бота
-BOT_TOKEN = os.getenv("BOT_TOKEN", "your_token_here")
-
-# ID канала для проверки подписки
-CHANNEL_ID = os.getenv("CHANNEL_ID", "@your_channel")
-
-# Секретный ключ для шифрования (тот, что из database.py)
-CRYPTO_KEY = os.getenv("CRYPTO_KEY", "your-base64-key-here=")
-
-# Режим отладки (True/False)
-DEBUG = os.getenv("DEBUG", "True") == "True"
+DB_NAME = "codemaster_v1.db"
+TRIAL_DAYS = 10
