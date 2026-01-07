@@ -1,78 +1,221 @@
 import aiosqlite
 import json
-from datetime import datetime, date
-from cryptography.fernet import Fernet
+from datetime import datetime
+from typing import Optional, Dict, Any
 
-# В 2026 году безопасность — приоритет. 
-# Ключ шифрования для токенов клиентов (храни его в .env)
-# SECRET_KEY = Fernet.generate_key() 
-SECRET_KEY = b'your-secure-base64-key-here='
-cipher = Fernet(SECRET_KEY)
+DB_PATH = "codemaster.db"
 
-DB_PATH = "codemaster_v1.db"
 
-async def init_db():
-    async with aiosqlite.connect(DB_PATH) as db:
-        # 1. ТАБЛИЦА ПОЛЬЗОВАТЕЛЕЙ И БАЛАНСОВ
-        await db.execute('''CREATE TABLE IF NOT EXISTS users (
-            user_id INTEGER PRIMARY KEY, -- Telegram ID
-            referrer_id INTEGER,
-            trial_days_balance INTEGER DEFAULT 10,
-            paid_days_balance INTEGER DEFAULT 0,
-            bonus_days_balance INTEGER DEFAULT 0,
-            current_status TEXT DEFAULT 'frozen', -- active/frozen/expired/deleted
-            is_sub_active BOOLEAN DEFAULT 0,
-            is_premium BOOLEAN DEFAULT 0,
-            cohort_date DATE DEFAULT (CURRENT_DATE),
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP,
-            FOREIGN KEY (referrer_id) REFERENCES users(user_id)
-        )''')
+class Database:
+    def __init__(self, db_path: str = DB_PATH):
+        self.db_path = db_path
 
-        # 2. ЖУРНАЛ ОПЕРАЦИЙ (Твой аудит)
-        await db.execute('''CREATE TABLE IF NOT EXISTS days_transactions (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            user_id INTEGER,
-            type TEXT, -- 'grant', 'purchase', 'referral', 'consumption'
-            days_change INTEGER,
-            balance_type TEXT, -- 'trial', 'paid', 'bonus'
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )''')
+    async def connect(self):
+        return await aiosqlite.connect(self.db_path)
 
-        # 3. БОТЫ КЛИЕНТОВ (Шифрованные)
-        await db.execute('''CREATE TABLE IF NOT EXISTS bots (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            owner_id INTEGER,
-            token_encrypted TEXT NOT NULL,
-            config_json TEXT DEFAULT '{}',
-            is_active BOOLEAN DEFAULT 1,
-            FOREIGN KEY (owner_id) REFERENCES users(user_id)
-        )''')
+    # ---------- INIT / MIGRATION ----------
 
-        # 4. РЕФЕРАЛЬНЫЕ СОБЫТИЯ
-        await db.execute('''CREATE TABLE IF NOT EXISTS referral_events (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            referrer_id INTEGER,
-            referred_id INTEGER UNIQUE,
-            stage TEXT, -- 'registered', 'bot_created', 'first_payment'
-            created_at DATETIME DEFAULT CURRENT_TIMESTAMP
-        )''')
+    async def init_db(self):
+        async with await self.connect() as db:
+            await db.executescript(
+                """
+                CREATE TABLE IF NOT EXISTS users (
+                    user_id INTEGER PRIMARY KEY,
+                    referrer_id INTEGER,
+                    trial_days INTEGER DEFAULT 10,
+                    paid_days INTEGER DEFAULT 0,
+                    bonus_days INTEGER DEFAULT 0,
+                    status TEXT DEFAULT 'ACTIVE',
+                    is_sub_active BOOLEAN DEFAULT 1,
+                    is_premium BOOLEAN DEFAULT 0,
+                    expired_at DATETIME,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-        await db.commit()
+                CREATE TABLE IF NOT EXISTS bots (
+                    bot_token_encrypted TEXT PRIMARY KEY,
+                    owner_id INTEGER,
+                    config_json TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-# --- ВСПОМОГАТЕЛЬНЫЕ ФУНКЦИИ ---
+                CREATE TABLE IF NOT EXISTS audit_log (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    user_id INTEGER,
+                    event TEXT,
+                    payload TEXT,
+                    created_at DATETIME DEFAULT CURRENT_TIMESTAMP
+                );
 
-def encrypt_token(token: str) -> str:
-    return cipher.encrypt(token.encode()).decode()
+                CREATE INDEX IF NOT EXISTS idx_users_referrer
+                ON users (referrer_id);
 
-async def add_days_transaction(user_id, t_type, change, b_type):
-    """Фиксирует каждое изменение баланса в аудите"""
-    async with aiosqlite.connect(DB_PATH) as db:
-        await db.execute(
-            "INSERT INTO days_transactions (user_id, type, days_change, balance_type) VALUES (?, ?, ?, ?)",
-            (user_id, t_type, change, b_type)
-        )
-        # Здесь же обновляем основной баланс в таблице users (логика упрощена)
-        query = f"UPDATE users SET {b_type}_days_balance = {b_type}_days_balance + ? WHERE user_id = ?"
-        await db.execute(query, (change, user_id))
-        await db.commit()
-      
+                CREATE INDEX IF NOT EXISTS idx_users_status
+                ON users (status);
+
+                CREATE INDEX IF NOT EXISTS idx_audit_user
+                ON audit_log (user_id);
+                """
+            )
+            await db.commit()
+
+    # ---------- USERS ----------
+
+    async def get_user(self, user_id: int) -> Optional[Dict[str, Any]]:
+        async with await self.connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                "SELECT * FROM users WHERE user_id = ?", (user_id,)
+            ) as cursor:
+                row = await cursor.fetchone()
+                return dict(row) if row else None
+
+    async def create_user(self, user_id: int, referrer_id: Optional[int] = None):
+        async with await self.connect() as db:
+            await db.execute(
+                """
+                INSERT OR IGNORE INTO users (user_id, referrer_id)
+                VALUES (?, ?)
+                """,
+                (user_id, referrer_id),
+            )
+            await db.commit()
+
+    async def update_user_fields(self, user_id: int, **fields):
+        if not fields:
+            return
+        columns = ", ".join([f"{k} = ?" for k in fields.keys()])
+        values = list(fields.values())
+        values.append(user_id)
+
+        async with await self.connect() as db:
+            await db.execute(
+                f"UPDATE users SET {columns} WHERE user_id = ?",
+                values,
+            )
+            await db.commit()
+
+    # ---------- DAYS MANAGEMENT ----------
+
+    async def add_trial_days(self, user_id: int, days: int):
+        async with await self.connect() as db:
+            await db.execute(
+                "UPDATE users SET trial_days = trial_days + ? WHERE user_id = ?",
+                (days, user_id),
+            )
+            await db.commit()
+
+    async def add_paid_days(self, user_id: int, days: int):
+        async with await self.connect() as db:
+            await db.execute(
+                "UPDATE users SET paid_days = paid_days + ? WHERE user_id = ?",
+                (days, user_id),
+            )
+            await db.commit()
+
+    async def add_bonus_days(self, user_id: int, days: int):
+        async with await self.connect() as db:
+            await db.execute(
+                "UPDATE users SET bonus_days = bonus_days + ? WHERE user_id = ?",
+                (days, user_id),
+            )
+            await db.commit()
+
+    async def consume_day(self, user_id: int, source: str):
+        """
+        source: 'trial' | 'paid' | 'bonus'
+        """
+        column_map = {
+            "trial": "trial_days",
+            "paid": "paid_days",
+            "bonus": "bonus_days",
+        }
+        column = column_map[source]
+
+        async with await self.connect() as db:
+            await db.execute(
+                f"""
+                UPDATE users
+                SET {column} = {column} - 1
+                WHERE user_id = ? AND {column} > 0
+                """,
+                (user_id,),
+            )
+            await db.commit()
+
+    # ---------- BOTS ----------
+
+    async def create_bot(
+        self,
+        bot_token_encrypted: str,
+        owner_id: int,
+        config: Dict[str, Any],
+    ):
+        async with await self.connect() as db:
+            await db.execute(
+                """
+                INSERT INTO bots (bot_token_encrypted, owner_id, config_json)
+                VALUES (?, ?, ?)
+                """,
+                (bot_token_encrypted, owner_id, json.dumps(config)),
+            )
+            await db.commit()
+
+    async def delete_bots_by_owner(self, owner_id: int):
+        async with await self.connect() as db:
+            await db.execute(
+                "DELETE FROM bots WHERE owner_id = ?",
+                (owner_id,),
+            )
+            await db.commit()
+
+    # ---------- AUDIT ----------
+
+    async def log_event(
+        self,
+        user_id: int,
+        event: str,
+        payload: Optional[Dict[str, Any]] = None,
+    ):
+        async with await self.connect() as db:
+            await db.execute(
+                """
+                INSERT INTO audit_log (user_id, event, payload)
+                VALUES (?, ?, ?)
+                """,
+                (
+                    user_id,
+                    event,
+                    json.dumps(payload) if payload else None,
+                ),
+            )
+            await db.commit()
+
+    # ---------- UTILS ----------
+
+    async def set_expired(self, user_id: int):
+        async with await self.connect() as db:
+            await db.execute(
+                """
+                UPDATE users
+                SET status = 'EXPIRED',
+                    expired_at = ?
+                WHERE user_id = ?
+                """,
+                (datetime.utcnow().isoformat(), user_id),
+            )
+            await db.commit()
+
+    async def get_expired_users_older_than(self, days: int):
+        async with await self.connect() as db:
+            db.row_factory = aiosqlite.Row
+            async with db.execute(
+                """
+                SELECT * FROM users
+                WHERE status = 'EXPIRED'
+                AND expired_at <= datetime('now', ?)
+                """,
+                (f"-{days} days",),
+            ) as cursor:
+                rows = await cursor.fetchall()
+                return [dict(row) for row in rows]
